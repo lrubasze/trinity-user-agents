@@ -34,15 +34,32 @@ pub async fn connect(url: Url) -> Result<Box<dyn JsonRpcConnection>, ProviderErr
         return Err(ProviderError::MissingRuntime);
     }
 
-    let (sender, receiver) = WsTransportClientBuilder::default()
-        .build(url.clone())
-        .await
-        .map_err(|err| ProviderError::Handshake {
-            url: crate::error::redacted(&url),
-            reason: err.to_string(),
-        })?;
+    let builder = WsTransportClientBuilder::default();
+    // rustls-platform-verifier needs a JNI initialisation with an Android
+    // Context that a bare cdylib never gets, and aborts the process without it.
+    #[cfg(all(target_os = "android", feature = "smoldot"))]
+    let builder = builder.with_custom_cert_store(bundled_roots_tls_config());
+
+    let (sender, receiver) =
+        builder
+            .build(url.clone())
+            .await
+            .map_err(|err| ProviderError::Handshake {
+                url: crate::error::redacted(&url),
+                reason: err.to_string(),
+            })?;
 
     Ok(Box::new(WsConnection::start(sender, receiver)))
+}
+
+#[cfg(all(target_os = "android", feature = "smoldot"))]
+fn bundled_roots_tls_config() -> tokio_rustls::rustls::ClientConfig {
+    let roots = tokio_rustls::rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    tokio_rustls::rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth()
 }
 
 /// A live WebSocket connection exposed as a raw JSON-RPC pipe.
