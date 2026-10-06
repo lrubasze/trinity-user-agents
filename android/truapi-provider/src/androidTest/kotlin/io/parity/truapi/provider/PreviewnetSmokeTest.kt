@@ -69,6 +69,30 @@ class PreviewnetSmokeTest {
         watch.stop()
         connection.disconnect()
     }
+
+    @Test
+    fun peopleRpcNodeAnswers() {
+        val answered = CountDownLatch(1)
+
+        val connection = ChainProvider().connectRpc(
+            "wss://previewnet.substrate.dev/people",
+            object : ChainMessageListener {
+                override fun onMessage(message: String) {
+                    Log.i(TAG, "rpc message: ${message.take(300)}")
+                    if (message.contains("\"id\":1")) answered.countDown()
+                }
+
+                override fun onClosed(reason: ChainCloseReason) {
+                    Log.i(TAG, "rpc closed: $reason")
+                }
+            }
+        )
+
+        connection.send("""{"jsonrpc":"2.0","id":1,"method":"chain_getFinalizedHead","params":[]}""")
+        assertTrue("no answer within 30 s", answered.await(30, TimeUnit.SECONDS))
+
+        connection.disconnect()
+    }
 }
 
 private fun String.hexToBytes(): ByteArray = chunked(2).map { it.toInt(16).toByte() }.toByteArray()
