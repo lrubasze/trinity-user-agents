@@ -364,21 +364,42 @@ impl ChainProvider {
             block_on(self.inner.connect(genesis)).map_err(|error| ChainProviderError::Connect {
                 reason: error.to_string(),
             })?;
-        let connection: Arc<dyn JsonRpcConnection> = Arc::from(connection);
+        start_pump(connection, listener)
+    }
 
-        let responses = connection.responses();
-        // Weak on purpose: a strong handle here would keep the connection alive
-        // forever. `Drop` is what calls `close()`, `close()` is what ends the
-        // response stream, and the pump parks on that stream -- so holding a
-        // strong reference means the drop that would release it can never run.
-        let pumped = Arc::downgrade(&connection);
-        spawn_pump("truapi-pump", pump_responses(responses, pumped, listener)).map_err(
-            |error| ChainProviderError::Connect {
-                reason: format!("could not start the response pump: {error}"),
-            },
-        )?;
-
-        Ok(Arc::new(ChainConnection { inner: connection }))
+    /// Open a JSON-RPC connection to the remote node at `url` (`ws://` or
+    /// `wss://`), bypassing the light client. Responses are delivered to
+    /// `listener` exactly as for [`connect`](Self::connect). A dropped socket
+    /// ends the connection; reconnecting is up to the host.
+    #[cfg(feature = "ws")]
+    pub fn connect_rpc(
+        &self,
+        url: String,
+        listener: Arc<dyn ChainMessageListener>,
+    ) -> Result<Arc<ChainConnection>, ChainProviderError> {
+        if PUMPING.get() {
+            return Err(ChainProviderError::Connect {
+                reason: "connect_rpc() cannot be called from a listener callback; \
+                         call it from another thread"
+                    .to_string(),
+            });
+        }
+        let url = url::Url::parse(&url).map_err(|error| ChainProviderError::Connect {
+            reason: format!("invalid url: {error}"),
+        })?;
+        let runtime = rpc_runtime()?;
+        let connection = runtime.block_on(crate::ws::connect(url)).map_err(|error| {
+            ChainProviderError::Connect {
+                reason: error.to_string(),
+            }
+        })?;
+        start_pump(
+            Box::new(InRuntime {
+                inner: connection,
+                runtime,
+            }),
+            listener,
+        )
     }
 
     /// Watch what the light client is doing on the chain identified by
@@ -404,6 +425,86 @@ impl ChainProvider {
             }
         })?;
         Ok(Arc::new(LifecycleWatch { stop }))
+    }
+}
+
+/// Pump `connection`'s responses into `listener` on a thread of its own and
+/// hand the host its side of the pipe.
+fn start_pump(
+    connection: Box<dyn JsonRpcConnection>,
+    listener: Arc<dyn ChainMessageListener>,
+) -> Result<Arc<ChainConnection>, ChainProviderError> {
+    let connection: Arc<dyn JsonRpcConnection> = Arc::from(connection);
+
+    let responses = connection.responses();
+    // Weak on purpose: a strong handle here would keep the connection alive
+    // forever. `Drop` is what calls `close()`, `close()` is what ends the
+    // response stream, and the pump parks on that stream -- so holding a
+    // strong reference means the drop that would release it can never run.
+    let pumped = Arc::downgrade(&connection);
+    spawn_pump("truapi-pump", pump_responses(responses, pumped, listener)).map_err(|error| {
+        ChainProviderError::Connect {
+            reason: format!("could not start the response pump: {error}"),
+        }
+    })?;
+
+    Ok(Arc::new(ChainConnection { inner: connection }))
+}
+
+/// The WebSocket backend needs an ambient tokio runtime for its socket and
+/// writer task. One current-thread runtime is driven for the life of the
+/// process on a dedicated thread; the pump threads poll the response stream
+/// against its reactor.
+#[cfg(feature = "ws")]
+fn rpc_runtime() -> Result<&'static tokio::runtime::Handle, ChainProviderError> {
+    static HANDLE: std::sync::OnceLock<Result<tokio::runtime::Handle, String>> =
+        std::sync::OnceLock::new();
+    HANDLE
+        .get_or_init(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())?;
+            let handle = runtime.handle().clone();
+            std::thread::Builder::new()
+                .name("truapi-rpc".to_string())
+                .spawn(move || runtime.block_on(core::future::pending::<()>()))
+                .map_err(|error| error.to_string())?;
+            Ok(handle)
+        })
+        .as_ref()
+        .map_err(|reason| ChainProviderError::Connect {
+            reason: format!("could not start the rpc runtime: {reason}"),
+        })
+}
+
+/// A WebSocket connection whose response stream is polled from a pump thread.
+/// The stream arms tokio timers, which need the runtime's context on whichever
+/// thread polls it, so every poll enters it.
+#[cfg(feature = "ws")]
+struct InRuntime {
+    inner: Box<dyn JsonRpcConnection>,
+    runtime: &'static tokio::runtime::Handle,
+}
+
+#[cfg(feature = "ws")]
+impl JsonRpcConnection for InRuntime {
+    fn send(&self, request: String) {
+        self.inner.send(request);
+    }
+
+    fn responses(&self) -> BoxStream<'static, String> {
+        let runtime = self.runtime;
+        let mut responses = self.inner.responses();
+        futures::stream::poll_fn(move |cx| {
+            let _context = runtime.enter();
+            responses.poll_next_unpin(cx)
+        })
+        .boxed()
+    }
+
+    fn close(&self) {
+        self.inner.close();
     }
 }
 
@@ -1011,6 +1112,55 @@ mod tests {
             .err()
             .expect("a 31-byte genesis must be rejected");
         assert!(matches!(error, ChainProviderError::BadGenesis));
+    }
+
+    #[cfg(feature = "ws")]
+    #[test]
+    fn connect_rpc_pipes_a_remote_node_without_an_ambient_runtime() {
+        use jsonrpsee::server::{RpcModule, Server};
+
+        let server_runtime = tokio::runtime::Runtime::new().expect("server runtime starts");
+        let (addr, _server) = server_runtime.block_on(async {
+            let server = Server::builder()
+                .build("127.0.0.1:0")
+                .await
+                .expect("loopback server binds");
+            let addr = server.local_addr().expect("server has a local address");
+            let mut module = RpcModule::new(());
+            module
+                .register_method("echo", |params, (), _extensions| {
+                    params.one::<String>().unwrap_or_default()
+                })
+                .expect("echo registers");
+            (addr, server.start(module))
+        });
+
+        let (listener, messages, closed) = Collector::new();
+        let connection = ChainProvider::new()
+            .connect_rpc(format!("ws://{addr}"), listener)
+            .expect("connects to the loopback node");
+        connection.send(r#"{"jsonrpc":"2.0","id":1,"method":"echo","params":["hi"]}"#.into());
+        let answer = messages
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the node answers");
+        assert!(answer.contains(r#""result":"hi""#), "{answer}");
+
+        connection.disconnect();
+        let reason = closed
+            .recv_timeout(Duration::from_secs(10))
+            .expect("on_closed fires");
+        assert!(matches!(reason, ChainCloseReason::StreamEnded));
+    }
+
+    #[cfg(feature = "ws")]
+    #[test]
+    fn connect_rpc_rejects_a_malformed_url() {
+        let (listener, _messages, _closed) = Collector::new();
+        let error = ChainProvider::new()
+            .connect_rpc("not a url".into(), listener)
+            .err()
+            .expect("a malformed url must be rejected");
+        assert!(matches!(error, ChainProviderError::Connect { .. }));
     }
 
     /// Foreign storage stand-in. The real one lives in Swift or Kotlin, so
