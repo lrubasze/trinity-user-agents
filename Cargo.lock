@@ -4609,9 +4609,8 @@ dependencies = [
 
 [[package]]
 name = "smoldot"
-version = "4.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4720bc1498521cb1094a2a377bfccbbf384a996a4f3bb510a4098f5138b46cee"
+version = "5.0.0"
+source = "git+https://github.com/paritytech/smoldot?rev=ebd69a4735b75b90f54e0e29d348d33434cbac82#ebd69a4735b75b90f54e0e29d348d33434cbac82"
 dependencies = [
  "ark-bls12-381 0.6.0",
  "ark-ec 0.6.0",
@@ -4662,6 +4661,7 @@ dependencies = [
  "slab",
  "smallvec",
  "soketto",
+ "strum 0.27.2",
  "twox-hash 2.1.3",
  "wasmi",
  "x25519-dalek",
@@ -4706,9 +4706,8 @@ dependencies = [
 
 [[package]]
 name = "smoldot-light"
-version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "966af62409c5fca98e23cb5dcda4044fe2aa380f217c8dddc967dca468198c8f"
+version = "3.0.0"
+source = "git+https://github.com/paritytech/smoldot?rev=ebd69a4735b75b90f54e0e29d348d33434cbac82#ebd69a4735b75b90f54e0e29d348d33434cbac82"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -4736,7 +4735,7 @@ dependencies = [
  "siphasher",
  "slab",
  "smol",
- "smoldot 4.0.0",
+ "smoldot 5.0.0",
  "strum 0.27.2",
  "zeroize",
 ]
@@ -5673,8 +5672,8 @@ dependencies = [
  "rand 0.8.7",
  "send_wrapper",
  "serde_json",
- "smoldot 4.0.0",
- "smoldot-light 2.1.0",
+ "smoldot 5.0.0",
+ "smoldot-light 3.0.0",
  "thiserror 1.0.69",
  "tokio",
  "tokio-rustls",
