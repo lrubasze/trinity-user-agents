@@ -68,8 +68,8 @@ serde = "1"
 serde_json = "1"
 sha2 = "0.10"
 shlex = "1"
-smoldot = { git = "https://github.com/paritytech/smoldot", rev = "ebd69a4735b75b90f54e0e29d348d33434cbac82", default-features = false }
-smoldot-light = { git = "https://github.com/paritytech/smoldot", rev = "ebd69a4735b75b90f54e0e29d348d33434cbac82", default-features = false }
+smoldot = { git = "https://github.com/paritytech/smoldot", rev = "23387aa0d6f2790174e8d94b1f7276b193fba4b4", default-features = false }
+smoldot-light = { git = "https://github.com/paritytech/smoldot", rev = "23387aa0d6f2790174e8d94b1f7276b193fba4b4", default-features = false }
 socket2 = "0.6"
 sp-crypto-hashing = { version = "0.1", default-features = false }
 substrate-bip39 = { version = "0.6", default-features = false }
