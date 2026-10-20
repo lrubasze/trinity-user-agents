@@ -98,11 +98,33 @@ fn write_line(level: log::Level, line: &str) {
         log::Level::Warn => 5,
         log::Level::Error => 6,
     };
-    let Ok(text) = std::ffi::CString::new(line.trim_end().replace('\0', " ")) else {
-        return;
-    };
-    // SAFETY: both pointers are NUL-terminated strings that outlive the call.
-    unsafe {
-        __android_log_write(priority, c"truapi-provider".as_ptr(), text.as_ptr());
+    // logcat drops whatever exceeds ~4 KiB of an entry, so longer lines are split and every
+    // continuation starts with `[cont] `.
+    let line = line.trim_end().replace('\0', " ");
+    let mut rest = line.as_str();
+    let mut first = true;
+    while first || !rest.is_empty() {
+        let mut end = rest.len().min(MAX_LOGCAT_CHUNK);
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        let (chunk, tail) = rest.split_at(end);
+        let text = if first {
+            chunk.to_owned()
+        } else {
+            format!("[cont] {chunk}")
+        };
+        let Ok(text) = std::ffi::CString::new(text) else {
+            return;
+        };
+        // SAFETY: both pointers are NUL-terminated strings that outlive the call.
+        unsafe {
+            __android_log_write(priority, c"truapi-provider".as_ptr(), text.as_ptr());
+        }
+        rest = tail;
+        first = false;
     }
 }
+
+#[cfg(target_os = "android")]
+const MAX_LOGCAT_CHUNK: usize = 3800;
